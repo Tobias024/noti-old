@@ -19,6 +19,7 @@
   <button id="edit-btn" disabled>Editar</button>
   <button id="save-btn" class="hidden">Guardar</button>
   <button id="cancel-btn" class="hidden">Cancelar</button>
+  <button id="insert-drawing-btn" class="hidden" title="Insertar dibujo">+ Dibujo</button>
   <button id="delete-btn" class="danger" disabled title="Borrar nota">Borrar</button>
   <button id="refresh-btn" title="Recargar arbol">&#x21bb;</button>
   <button id="settings-btn" title="Configuracion">&#9881;</button>
@@ -32,6 +33,7 @@
   <main id="main">
     <div id="render" class="render"></div>
     <textarea id="editor" class="hidden" spellcheck="false"></textarea>
+    <div id="drawings-strip" class="drawings-strip hidden"></div>
     <div id="empty" class="empty">Elegi una nota de la izquierda, o creá una nueva.</div>
   </main>
 </div>
@@ -99,9 +101,41 @@
   </div>
 </div>
 
+<div id="modal-drawing" class="modal modal-full hidden" aria-hidden="true">
+  <div class="modal-box modal-box-full">
+    <div id="drawing-toolbar" class="drawing-toolbar">
+      <button class="tool" data-role="tool" data-tool="pen">Lapiz</button>
+      <button class="tool" data-role="tool" data-tool="line">Linea</button>
+      <button class="tool" data-role="tool" data-tool="rect">Rect</button>
+      <button class="tool" data-role="tool" data-tool="ellipse">Elipse</button>
+      <button class="tool" data-role="tool" data-tool="select">Mover</button>
+      <button class="tool" data-role="tool" data-tool="eraser">Borrar</button>
+      <span class="sep"></span>
+      <label>Color <input type="color" data-role="color" value="#1e1e1e"></label>
+      <label>Grosor <input type="range" data-role="size" min="1" max="20" value="2"></label>
+      <label>Estilo
+        <select data-role="style">
+          <option value="sketch" selected>A mano</option>
+          <option value="crisp">Limpio</option>
+        </select>
+      </label>
+      <span class="sep"></span>
+      <button data-role="undo">Deshacer</button>
+      <button data-role="redo">Rehacer</button>
+      <button data-role="reset-view">Centrar</button>
+      <button data-role="clear">Limpiar</button>
+      <span class="spacer"></span>
+      <button id="drawing-cancel" class="ghost">Cancelar</button>
+      <button id="drawing-done">Listo</button>
+    </div>
+    <canvas id="drawing-canvas"></canvas>
+  </div>
+</div>
+
 <div id="toast" class="toast hidden"></div>
 
 <script src="vendor/snarkdown.js"></script>
+<script src="vendor/excaliold.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

@@ -11,6 +11,13 @@
   var elSaveBtn = document.getElementById('save-btn');
   var elCancelBtn = document.getElementById('cancel-btn');
   var elDeleteBtn = document.getElementById('delete-btn');
+  var elInsertDrawingBtn = document.getElementById('insert-drawing-btn');
+  var elDrawingsStrip = document.getElementById('drawings-strip');
+  var elModalDrawing = document.getElementById('modal-drawing');
+  var elDrawingToolbar = document.getElementById('drawing-toolbar');
+  var elDrawingCanvas = document.getElementById('drawing-canvas');
+  var elDrawingDone = document.getElementById('drawing-done');
+  var elDrawingCancel = document.getElementById('drawing-cancel');
   var elRefreshBtn = document.getElementById('refresh-btn');
   var elSettingsBtn = document.getElementById('settings-btn');
   var elThemeBtn = document.getElementById('theme-btn');
@@ -70,7 +77,10 @@
     openContent: '',
     editing: false,
     newKind: 'file',
-    expanded: {}       // folder paths -> true
+    expanded: {},      // folder paths -> true
+    pendingDrawings: {},  // path -> {elements, sha} — cambios sin guardar
+    drawingCache: {},     // path -> {version, elements, sha} — cache de la nota abierta
+    activeDrawing: null   // {path, api} cuando el modal de dibujo esta abierto
   };
 
   // ------------- Helpers -------------
@@ -237,6 +247,9 @@
     for (var i = 0; i < items.length; i++) {
       var it = items[i];
       if (!it.path) continue;
+
+      // Ocultar la carpeta de dibujos del sidebar
+      if (it.path === 'assets' || it.path.indexOf('assets/') === 0) continue;
 
       if (it.type === 'tree') {
         ensurePath(root, it.path, false);
@@ -451,6 +464,169 @@
     try { html = window.snarkdown(md || ''); }
     catch (e) { html = '<p>(error renderizando)</p>'; }
     elRender.innerHTML = html;
+    postProcessDrawings();
+  }
+
+  function postProcessDrawings() {
+    if (!window.Drawing) return;
+    var imgs = elRender.getElementsByTagName('img');
+    // Snapshot porque vamos a mutar el DOM
+    var toProcess = [];
+    for (var i = 0; i < imgs.length; i++) {
+      var src = imgs[i].getAttribute('src') || '';
+      if (/\.draw($|\?)/i.test(src)) toProcess.push({ img: imgs[i], path: src });
+    }
+    for (var j = 0; j < toProcess.length; j++) {
+      (function (path, img) {
+        var canvas = document.createElement('canvas');
+        canvas.className = 'render-drawing';
+        if (img.parentNode) img.parentNode.replaceChild(canvas, img);
+        fetchDrawing(path, function (err, data) {
+          if (err) {
+            var broken = document.createElement('span');
+            broken.className = 'render-drawing-broken';
+            broken.textContent = '(dibujo no encontrado: ' + path + ')';
+            if (canvas.parentNode) canvas.parentNode.replaceChild(broken, canvas);
+            return;
+          }
+          window.Drawing.renderStatic(canvas, data.elements || []);
+        });
+      })(toProcess[j].path, toProcess[j].img);
+    }
+  }
+
+  function fetchDrawing(path, cb) {
+    if (state.pendingDrawings[path]) { cb(null, state.pendingDrawings[path]); return; }
+    if (state.drawingCache[path]) { cb(null, state.drawingCache[path]); return; }
+    apiGetFile(path, function (err, data) {
+      if (err) { cb(err); return; }
+      var parsed;
+      try {
+        var content = decB64(data.content || '');
+        parsed = JSON.parse(content);
+        if (!parsed.elements) parsed.elements = [];
+      } catch (e) {
+        cb({ status: 0, error: 'JSON invalido en ' + path });
+        return;
+      }
+      parsed.sha = data.sha;
+      state.drawingCache[path] = parsed;
+      cb(null, parsed);
+    });
+  }
+
+  function generateDrawingId() {
+    var chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+    var id = '';
+    for (var i = 0; i < 12; i++) {
+      id += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return id;
+  }
+
+  function parseDrawingRefs(text) {
+    var refs = [];
+    var seen = {};
+    var re = /!\[[^\]]*\]\((assets\/[^\)\s]+?\.draw)\)/g;
+    var m;
+    while ((m = re.exec(text)) !== null) {
+      if (!seen[m[1]]) { seen[m[1]] = true; refs.push(m[1]); }
+    }
+    return refs;
+  }
+
+  function refreshDrawingStrip() {
+    var refs = parseDrawingRefs(elEditor.value || '');
+    elDrawingsStrip.innerHTML = '';
+    if (!refs.length) {
+      elDrawingsStrip.classList.add('hidden');
+      elEditor.classList.remove('with-strip');
+      return;
+    }
+    elDrawingsStrip.classList.remove('hidden');
+    elEditor.classList.add('with-strip');
+    var label = document.createElement('div');
+    label.className = 'strip-label';
+    label.textContent = 'Dibujos en esta nota (tap para editar):';
+    elDrawingsStrip.appendChild(label);
+    for (var i = 0; i < refs.length; i++) {
+      (function (path) {
+        var thumb = document.createElement('div');
+        thumb.className = 'drawing-thumb';
+        var canvas = document.createElement('canvas');
+        thumb.appendChild(canvas);
+        var lbl = document.createElement('span');
+        lbl.className = 'thumb-label';
+        lbl.textContent = path.split('/').pop();
+        thumb.appendChild(lbl);
+        thumb.onclick = function () { openDrawingModal(path); };
+        elDrawingsStrip.appendChild(thumb);
+        fetchDrawing(path, function (err, data) {
+          if (err) { thumb.title = 'No se pudo cargar'; return; }
+          if (window.Drawing) window.Drawing.renderStatic(canvas, data.elements || []);
+        });
+      })(refs[i]);
+    }
+  }
+
+  function insertAtCursor(textarea, text) {
+    textarea.focus();
+    var start = textarea.selectionStart || 0;
+    var end = textarea.selectionEnd || 0;
+    var value = textarea.value;
+    textarea.value = value.substring(0, start) + text + value.substring(end);
+    var newPos = start + text.length;
+    textarea.selectionStart = textarea.selectionEnd = newPos;
+  }
+
+  function openDrawingModal(pathOrNull) {
+    if (state.activeDrawing) return;
+    var isNew = !pathOrNull;
+    var path = pathOrNull || ('assets/d-' + generateDrawingId() + '.draw');
+    state.activeDrawing = { path: path, isNew: isNew, api: null };
+    elModalDrawing.classList.remove('hidden');
+
+    function mountWith(elements) {
+      if (!window.Drawing) {
+        toast('Modulo de dibujo no cargado');
+        closeDrawingModal(false);
+        return;
+      }
+      state.activeDrawing.api = window.Drawing.mount(
+        elDrawingCanvas, elDrawingToolbar, { initialElements: elements }
+      );
+    }
+
+    setTimeout(function () {
+      if (isNew) { mountWith([]); return; }
+      var entry = state.pendingDrawings[path] || state.drawingCache[path];
+      if (entry) { mountWith(entry.elements || []); return; }
+      fetchDrawing(path, function (err, data) {
+        if (err) {
+          toast('No se pudo cargar el dibujo: ' + friendlyError(err));
+          closeDrawingModal(false);
+          return;
+        }
+        mountWith(data.elements || []);
+      });
+    }, 50);
+  }
+
+  function closeDrawingModal(commit) {
+    if (!state.activeDrawing) return;
+    var ad = state.activeDrawing;
+    if (commit && ad.api) {
+      var elements = ad.api.getElements();
+      var existingSha = null;
+      if (state.pendingDrawings[ad.path]) existingSha = state.pendingDrawings[ad.path].sha;
+      else if (state.drawingCache[ad.path]) existingSha = state.drawingCache[ad.path].sha;
+      state.pendingDrawings[ad.path] = { elements: elements, sha: existingSha };
+      if (ad.isNew) insertAtCursor(elEditor, '\n\n![drawing](' + ad.path + ')\n\n');
+      refreshDrawingStrip();
+    }
+    if (ad.api) { try { ad.api.destroy(); } catch (e) {} }
+    state.activeDrawing = null;
+    elModalDrawing.classList.add('hidden');
   }
 
   // ------------- Edit / save -------------
@@ -464,8 +640,10 @@
       elSaveBtn.classList.remove('hidden');
       elCancelBtn.classList.remove('hidden');
       elDeleteBtn.classList.add('hidden');
+      elInsertDrawingBtn.classList.remove('hidden');
       elNewBtn.disabled = true;
-    setTimeout(function () { elEditor.focus(); }, 30);
+      refreshDrawingStrip();
+      setTimeout(function () { elEditor.focus(); }, 30);
     } else {
       state.editing = false;
       elEditor.classList.add('hidden');
@@ -474,15 +652,54 @@
       elSaveBtn.classList.add('hidden');
       elCancelBtn.classList.add('hidden');
       elDeleteBtn.classList.remove('hidden');
+      elInsertDrawingBtn.classList.add('hidden');
+      elDrawingsStrip.classList.add('hidden');
+      elEditor.classList.remove('with-strip');
       elNewBtn.disabled = false;
     }
   }
 
   function saveCurrent() {
     if (!state.openPath) return;
-    var newContent = elEditor.value;
     elSaveBtn.disabled = true;
     elCancelBtn.disabled = true;
+
+    var pendingPaths = [];
+    for (var p in state.pendingDrawings) {
+      if (state.pendingDrawings.hasOwnProperty(p)) pendingPaths.push(p);
+    }
+    if (pendingPaths.length) toast('Subiendo ' + pendingPaths.length + ' dibujo(s)...', 4000);
+    uploadPendingDrawings(pendingPaths, 0, function (err) {
+      if (err) {
+        elSaveBtn.disabled = false;
+        elCancelBtn.disabled = false;
+        toast('Error guardando dibujo: ' + friendlyError(err));
+        return;
+      }
+      saveNoteText();
+    });
+  }
+
+  function uploadPendingDrawings(paths, idx, cb) {
+    if (idx >= paths.length) { cb(null); return; }
+    var path = paths[idx];
+    var entry = state.pendingDrawings[path];
+    var content = JSON.stringify({ version: 1, elements: entry.elements });
+    apiPutFile(path, content, entry.sha, 'Update drawing ' + path, function (err, data) {
+      if (err) { cb(err); return; }
+      var newSha = (data && data.content && data.content.sha) || null;
+      var wasNew = !entry.sha;
+      state.drawingCache[path] = { version: 1, elements: entry.elements, sha: newSha };
+      delete state.pendingDrawings[path];
+      if (wasNew) {
+        state.tree.push({ path: path, type: 'blob', sha: newSha });
+      }
+      uploadPendingDrawings(paths, idx + 1, cb);
+    });
+  }
+
+  function saveNoteText() {
+    var newContent = elEditor.value;
     apiPutFile(state.openPath, newContent, state.openSha, 'Update ' + state.openPath,
       function (err, data) {
         elSaveBtn.disabled = false;
@@ -502,7 +719,6 @@
         renderMarkdown(newContent);
         setMode('view');
         toast('Guardado');
-        // invalidate tree cache (in case a new file was created or path changed)
         try { localStorage.removeItem(LS_TREE); } catch (e) {}
       });
   }
@@ -534,6 +750,8 @@
     state.openPath = null;
     state.openSha = null;
     state.openContent = '';
+    state.pendingDrawings = {};
+    state.drawingCache = {};
     try { localStorage.removeItem(LS_LAST); } catch (e) {}
     elPath.textContent = '';
     elRender.innerHTML = '';
@@ -814,11 +1032,15 @@
       setMode('edit');
     };
     elCancelBtn.onclick = function () {
+      state.pendingDrawings = {};
       setMode('view');
       renderMarkdown(state.openContent);
     };
     elSaveBtn.onclick = saveCurrent;
     elDeleteBtn.onclick = deleteCurrent;
+    elInsertDrawingBtn.onclick = function () { openDrawingModal(null); };
+    elDrawingDone.onclick = function () { closeDrawingModal(true); };
+    elDrawingCancel.onclick = function () { closeDrawingModal(false); };
   }
 
   // ------------- Boot -------------
