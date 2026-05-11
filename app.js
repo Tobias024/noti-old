@@ -50,7 +50,15 @@
   var LS_TREE = 'notas.treeCache';   // {ts, items}
   var LS_THEME = 'notas.theme';
   var TREE_TTL_MS = 60 * 1000;
-  var API = 'https://api.github.com';
+
+  // En deploy (Vercel) usamos el proxy /api/gh para evitar problemas de TLS/CORS
+  // con dispositivos viejos (iPad mini 1 / Safari 9). En dev (file://, localhost)
+  // pegamos directo a api.github.com.
+  var IS_DEPLOYED = (location.protocol === 'http:' || location.protocol === 'https:')
+    && location.hostname
+    && location.hostname !== 'localhost'
+    && location.hostname !== '127.0.0.1';
+  var API = IS_DEPLOYED ? (location.origin + '/api/gh') : 'https://api.github.com';
 
   // ------------- State -------------
   var state = {
@@ -113,6 +121,17 @@
     var dark = document.body.className !== 'theme-dark';
     document.body.className = dark ? 'theme-dark' : '';
     localStorage.setItem(LS_THEME, dark ? 'dark' : 'light');
+  }
+
+  function friendlyError(err) {
+    if (!err) return 'Error';
+    var msg = err.error || '';
+    if (err.status === 422 && /sha/i.test(msg)) return 'Ya existe un archivo en esa ruta.';
+    if (err.status === 404) return 'No encontrado (revisá user/repo/branch).';
+    if (err.status === 401) return 'PAT invalido o sin permisos.';
+    if (err.status === 403) return 'Acceso denegado por GitHub (' + msg + ').';
+    if (err.status === 0) return 'Sin conexion (' + (IS_DEPLOYED ? 'proxy' : 'GitHub') + ' inaccesible).';
+    return msg || ('Error HTTP ' + (err.status || '?'));
   }
 
   // ------------- GitHub API client -------------
@@ -196,53 +215,77 @@
   }
 
   // ------------- Tree render -------------
+  // GitHub no permite carpetas vacias en git. Para representar una carpeta
+  // creada desde la app usamos un archivo .gitkeep adentro. Esos .gitkeep
+  // no se muestran como archivos, pero marcan la carpeta como "mantener".
   function buildTreeNodes(items) {
-    // root node
     var root = { name: '', path: '', type: 'tree', children: {}, order: [] };
+    var explicitFolders = {};
+
     for (var i = 0; i < items.length; i++) {
       var it = items[i];
       if (!it.path) continue;
-      // Only show .md files (and folders that lead to them)
-      if (it.type === 'blob' && !/\.md$/i.test(it.path)) continue;
-      var parts = it.path.split('/');
-      var node = root;
-      for (var j = 0; j < parts.length; j++) {
-        var name = parts[j];
-        var isLeaf = (j === parts.length - 1);
-        var nodeType = isLeaf ? it.type : 'tree';
-        if (!node.children[name]) {
-          var childPath = parts.slice(0, j + 1).join('/');
-          node.children[name] = {
-            name: name,
-            path: childPath,
-            type: nodeType,
-            children: {},
-            order: []
-          };
-          node.order.push(name);
-        } else if (isLeaf) {
-          node.children[name].type = it.type;
-        }
-        node = node.children[name];
+
+      if (it.type === 'tree') {
+        ensurePath(root, it.path, false);
+        continue;
       }
+      if (it.type !== 'blob') continue;
+
+      if (/(^|\/)\.gitkeep$/i.test(it.path)) {
+        var folder = it.path.replace(/(^|\/)\.gitkeep$/i, '');
+        if (folder) {
+          ensurePath(root, folder, false);
+          explicitFolders[folder] = true;
+        }
+        continue;
+      }
+
+      if (!/\.md$/i.test(it.path)) continue;
+      ensurePath(root, it.path, true);
     }
-    // remove folders that ended up empty (no .md descendants)
-    pruneEmpty(root);
+
+    pruneEmpty(root, explicitFolders);
     return root;
   }
 
-  function pruneEmpty(node) {
+  function ensurePath(rootNode, path, lastIsFile) {
+    var parts = path.split('/');
+    var node = rootNode;
+    for (var j = 0; j < parts.length; j++) {
+      var name = parts[j];
+      var isLeaf = (j === parts.length - 1);
+      var typ = (isLeaf && lastIsFile) ? 'blob' : 'tree';
+      if (!node.children[name]) {
+        node.children[name] = {
+          name: name,
+          path: parts.slice(0, j + 1).join('/'),
+          type: typ,
+          children: {},
+          order: []
+        };
+        node.order.push(name);
+      } else if (isLeaf && lastIsFile) {
+        node.children[name].type = 'blob';
+      }
+      node = node.children[name];
+    }
+  }
+
+  function pruneEmpty(node, explicitFolders) {
     if (node.type !== 'tree') return node.type === 'blob';
     var keep = [];
     for (var i = 0; i < node.order.length; i++) {
       var name = node.order[i];
       var child = node.children[name];
-      var has = pruneEmpty(child);
-      if (has) { keep.push(name); }
-      else { delete node.children[name]; }
+      var has = pruneEmpty(child, explicitFolders);
+      if (has || (child.type === 'tree' && explicitFolders[child.path])) {
+        keep.push(name);
+      } else {
+        delete node.children[name];
+      }
     }
     node.order = keep;
-    // sort: folders first, then files; alphabetical inside each group
     node.order.sort(function (a, b) {
       var ca = node.children[a], cb = node.children[b];
       if (ca.type !== cb.type) return ca.type === 'tree' ? -1 : 1;
@@ -356,7 +399,7 @@
     elEditBtn.disabled = true;
     apiGetFile(path, function (err, data) {
       if (err) {
-        toast('Error al abrir: ' + err.error);
+        toast('Error al abrir: ' + friendlyError(err));
         return;
       }
       var content = '';
@@ -419,7 +462,7 @@
             showConflict(newContent);
             return;
           }
-          toast('Error al guardar: ' + err.error);
+          toast('Error al guardar: ' + friendlyError(err));
           return;
         }
         state.openContent = newContent;
@@ -498,22 +541,30 @@
       setMsg(elNewMsg, 'Creando...');
       apiPutFile(fpath, '# ' + name.replace(/\.md$/i, '') + '\n\n', null,
         'Create ' + fpath, function (err) {
-          if (err) { setMsg(elNewMsg, err.error); return; }
+          if (err) { setMsg(elNewMsg, friendlyError(err)); return; }
           elModalNew.classList.add('hidden');
           try { localStorage.removeItem(LS_TREE); } catch (e) {}
-          loadTreeFromServer(function () {
-            openNote(fpath);
-          });
+          // Update optimista: GitHub's git/trees endpoint puede tardar segundos en
+          // reflejar el archivo nuevo. Lo agregamos al estado local para que aparezca
+          // ya, y refrescamos del server con delay como safety net.
+          state.tree.push({ path: fpath, type: 'blob' });
+          expandAncestors(fpath);
+          renderTree();
+          openNote(fpath);
+          setTimeout(function () { loadTreeFromServer(); }, 1500);
         });
     } else {
       var fpath2 = (parent ? parent + '/' : '') + name + '/.gitkeep';
+      var folderPath = (parent ? parent + '/' : '') + name;
       setMsg(elNewMsg, 'Creando...');
       apiPutFile(fpath2, '', null, 'Create folder ' + name, function (err) {
-        if (err) { setMsg(elNewMsg, err.error); return; }
+        if (err) { setMsg(elNewMsg, friendlyError(err)); return; }
         elModalNew.classList.add('hidden');
         try { localStorage.removeItem(LS_TREE); } catch (e) {}
-        state.expanded[(parent ? parent + '/' : '') + name] = true;
-        loadTreeFromServer();
+        state.tree.push({ path: fpath2, type: 'blob' });
+        state.expanded[folderPath] = true;
+        renderTree();
+        setTimeout(function () { loadTreeFromServer(); }, 1500);
       });
     }
   }
@@ -548,7 +599,7 @@
       elCfgSave.disabled = false;
       if (err) {
         state.cfg = prev;
-        setMsg(elCfgMsg, 'Error: ' + err.error);
+        setMsg(elCfgMsg, 'Error: ' + friendlyError(err));
         return;
       }
       saveCfg(c);
@@ -593,7 +644,7 @@
       try { localStorage.removeItem(LS_TREE); } catch (e) {}
       if (!state.cfg) { openSetupModal(); return; }
       loadTreeFromServer(function (err) {
-        if (err) { toast('Error: ' + err.error); return; }
+        if (err) { toast('Error: ' + friendlyError(err)); return; }
         toast('Recargado');
       });
     };
@@ -631,7 +682,7 @@
     var last = localStorage.getItem(LS_LAST);
     loadTreeFresh(function (err) {
       if (err) {
-        toast('Error: ' + err.error);
+        toast('Error: ' + friendlyError(err));
         if (err.status === 401 || err.status === 404) {
           openSetupModal(cfg);
         }
