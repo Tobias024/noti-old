@@ -10,6 +10,7 @@
   var elEditBtn = document.getElementById('edit-btn');
   var elSaveBtn = document.getElementById('save-btn');
   var elCancelBtn = document.getElementById('cancel-btn');
+  var elDeleteBtn = document.getElementById('delete-btn');
   var elRefreshBtn = document.getElementById('refresh-btn');
   var elSettingsBtn = document.getElementById('settings-btn');
   var elThemeBtn = document.getElementById('theme-btn');
@@ -357,6 +358,21 @@
     row.appendChild(caret);
     row.appendChild(icon);
     row.appendChild(nameEl);
+
+    if (node.type === 'tree') {
+      var del = document.createElement('span');
+      del.className = 'del';
+      del.innerHTML = '&times;';
+      del.title = 'Borrar carpeta';
+      (function (path) {
+        del.onclick = function (e) {
+          if (e.stopPropagation) e.stopPropagation();
+          deleteFolder(path);
+        };
+      })(node.path);
+      row.appendChild(del);
+    }
+
     li.appendChild(row);
 
     if (node.type === 'tree' && state.expanded[node.path]) {
@@ -423,6 +439,7 @@
       expandAncestors(path);
       renderMarkdown(content);
       elEditBtn.disabled = false;
+      elDeleteBtn.disabled = false;
       renderTree();
       // close sidebar overlay on small screens
       if (window.innerWidth <= 720) elSidebar.classList.add('hidden');
@@ -446,8 +463,9 @@
       elEditBtn.classList.add('hidden');
       elSaveBtn.classList.remove('hidden');
       elCancelBtn.classList.remove('hidden');
+      elDeleteBtn.classList.add('hidden');
       elNewBtn.disabled = true;
-      setTimeout(function () { elEditor.focus(); }, 30);
+    setTimeout(function () { elEditor.focus(); }, 30);
     } else {
       state.editing = false;
       elEditor.classList.add('hidden');
@@ -455,6 +473,7 @@
       elEditBtn.classList.remove('hidden');
       elSaveBtn.classList.add('hidden');
       elCancelBtn.classList.add('hidden');
+      elDeleteBtn.classList.remove('hidden');
       elNewBtn.disabled = false;
     }
   }
@@ -486,6 +505,93 @@
         // invalidate tree cache (in case a new file was created or path changed)
         try { localStorage.removeItem(LS_TREE); } catch (e) {}
       });
+  }
+
+  function deleteCurrent() {
+    if (!state.openPath) return;
+    if (!confirm('Borrar "' + state.openPath + '"? Esta accion no se puede deshacer.')) return;
+    elDeleteBtn.disabled = true;
+    var path = state.openPath;
+    var c = state.cfg;
+    api('DELETE', '/repos/' + c.user + '/' + c.repo + '/contents/' + encodePath(path),
+      { message: 'Delete ' + path, sha: state.openSha, branch: c.branch },
+      function (err) {
+        if (err) {
+          toast('Error al borrar: ' + friendlyError(err));
+          elDeleteBtn.disabled = false;
+          return;
+        }
+        state.tree = state.tree.filter(function (it) { return it.path !== path; });
+        clearOpenNote();
+        renderTree();
+        toast('Borrado');
+        try { localStorage.removeItem(LS_TREE); } catch (e) {}
+        setTimeout(loadTreeFromServer, 1500);
+      });
+  }
+
+  function clearOpenNote() {
+    state.openPath = null;
+    state.openSha = null;
+    state.openContent = '';
+    try { localStorage.removeItem(LS_LAST); } catch (e) {}
+    elPath.textContent = '';
+    elRender.innerHTML = '';
+    elRender.classList.add('hidden');
+    elEmpty.classList.remove('hidden');
+    elEditBtn.disabled = true;
+    elDeleteBtn.disabled = true;
+  }
+
+  function deleteFolder(folderPath) {
+    if (!confirm('Borrar carpeta "' + folderPath + '" y TODO su contenido? Esta accion no se puede deshacer.')) return;
+    var prefix = folderPath + '/';
+    var toDelete = [];
+    for (var i = 0; i < state.tree.length; i++) {
+      var it = state.tree[i];
+      if (it.type === 'blob' && it.path.indexOf(prefix) === 0) {
+        toDelete.push(it);
+      }
+    }
+    if (!toDelete.length) {
+      toast('Carpeta sin archivos para borrar');
+      return;
+    }
+    toast('Borrando ' + toDelete.length + ' archivo(s)...', 5000);
+    deleteSequence(toDelete, 0, folderPath);
+  }
+
+  function deleteSequence(items, idx, folderPath) {
+    if (idx >= items.length) {
+      var prefix = folderPath + '/';
+      state.tree = state.tree.filter(function (it) {
+        return !(it.type === 'blob' && it.path.indexOf(prefix) === 0);
+      });
+      if (state.openPath && state.openPath.indexOf(prefix) === 0) clearOpenNote();
+      renderTree();
+      toast('Carpeta borrada');
+      try { localStorage.removeItem(LS_TREE); } catch (e) {}
+      setTimeout(loadTreeFromServer, 1500);
+      return;
+    }
+    var it = items[idx];
+    var c = state.cfg;
+    function doDel(sha) {
+      api('DELETE', '/repos/' + c.user + '/' + c.repo + '/contents/' + encodePath(it.path),
+        { message: 'Delete ' + it.path, sha: sha, branch: c.branch },
+        function (err) {
+          if (err) { toast('Error al borrar ' + it.path + ': ' + friendlyError(err)); return; }
+          deleteSequence(items, idx + 1, folderPath);
+        });
+    }
+    if (it.sha) {
+      doDel(it.sha);
+    } else {
+      apiGetFile(it.path, function (err, data) {
+        if (err) { toast('Error: ' + friendlyError(err)); return; }
+        doDel(data.sha);
+      });
+    }
   }
 
   function showConflict(localText) {
@@ -524,7 +630,7 @@
     elNewTabFile.className = state.newKind === 'file' ? 'tab active' : 'tab';
     elNewTabFolder.className = state.newKind === 'folder' ? 'tab active' : 'tab';
     elNewNameLabel.firstChild.nodeValue = state.newKind === 'file' ? 'Nombre (sin .md)' : 'Nombre carpeta';
-    elNewParent.value = inferParent();
+    populateParentSelect(inferParent());
     elNewName.value = '';
     setMsg(elNewMsg, '');
     elModalNew.classList.remove('hidden');
@@ -539,9 +645,50 @@
     return '';
   }
 
+  function collectFolders() {
+    var seen = {};
+    for (var i = 0; i < state.tree.length; i++) {
+      var it = state.tree[i];
+      var parents = [];
+      if (it.type === 'tree') {
+        parents.push(it.path);
+      } else if (it.type === 'blob') {
+        var p = it.path;
+        var idx = p.lastIndexOf('/');
+        while (idx > 0) {
+          parents.push(p.substring(0, idx));
+          idx = p.lastIndexOf('/', idx - 1);
+        }
+      }
+      for (var j = 0; j < parents.length; j++) {
+        if (parents[j]) seen[parents[j]] = true;
+      }
+    }
+    var arr = [];
+    for (var k in seen) if (seen.hasOwnProperty(k)) arr.push(k);
+    arr.sort();
+    return arr;
+  }
+
+  function populateParentSelect(preferredParent) {
+    var folders = collectFolders();
+    elNewParent.innerHTML = '';
+    var opt0 = document.createElement('option');
+    opt0.value = '';
+    opt0.textContent = '(raíz)';
+    elNewParent.appendChild(opt0);
+    for (var i = 0; i < folders.length; i++) {
+      var opt = document.createElement('option');
+      opt.value = folders[i];
+      opt.textContent = folders[i];
+      elNewParent.appendChild(opt);
+    }
+    if (preferredParent != null) elNewParent.value = preferredParent;
+  }
+
   function createNew() {
-    var parent = (elNewParent.value || '').replace(/^\/+|\/+$/g, '');
-    var name = (elNewName.value || '').replace(/^\/+|\/+$/g, '');
+    var parent = (elNewParent.value || '').replace(/^\s+|\s+$/g, '').replace(/^\/+|\/+$/g, '');
+    var name = (elNewName.value || '').replace(/^\s+|\s+$/g, '').replace(/^\/+|\/+$/g, '');
     if (!name) { setMsg(elNewMsg, 'Falta el nombre'); return; }
     if (/[\\:*?"<>|]/.test(name) || /\/\s|\s\/$/.test(name)) {
       setMsg(elNewMsg, 'Caracteres no permitidos en el nombre'); return;
@@ -638,15 +785,8 @@
       clearCfg();
       state.cfg = null;
       state.tree = [];
-      state.openPath = null;
-      state.openSha = null;
-      state.openContent = '';
+      clearOpenNote();
       elTree.innerHTML = '';
-      elRender.innerHTML = '';
-      elPath.textContent = '';
-      elEditBtn.disabled = true;
-      elEmpty.classList.remove('hidden');
-      elRender.classList.add('hidden');
       elModalSetup.classList.add('hidden');
       openSetupModal({ user: '', repo: '', branch: 'main', pat: '' });
     };
@@ -678,6 +818,7 @@
       renderMarkdown(state.openContent);
     };
     elSaveBtn.onclick = saveCurrent;
+    elDeleteBtn.onclick = deleteCurrent;
   }
 
   // ------------- Boot -------------

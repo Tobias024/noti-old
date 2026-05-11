@@ -19,6 +19,7 @@
   <button id="edit-btn" disabled>Editar</button>
   <button id="save-btn" class="hidden">Guardar</button>
   <button id="cancel-btn" class="hidden">Cancelar</button>
+  <button id="delete-btn" class="danger" disabled title="Borrar nota">Borrar</button>
   <button id="refresh-btn" title="Recargar arbol">&#x21bb;</button>
   <button id="settings-btn" title="Configuracion">&#9881;</button>
   <button id="theme-btn" title="Tema">Tema</button>
@@ -68,12 +69,13 @@
       <button id="new-tab-file" class="tab active" data-kind="file">Nota</button>
       <button id="new-tab-folder" class="tab" data-kind="folder">Carpeta</button>
     </div>
-    <label class="field">Carpeta destino (vacio para raiz)
-      <input type="text" id="new-parent" autocomplete="off" autocorrect="off" autocapitalize="off" placeholder="trabajo/2026">
+    <label class="field">Carpeta destino
+      <select id="new-parent"></select>
     </label>
     <label class="field" id="new-name-label">Nombre (sin .md)
       <input type="text" id="new-name" autocomplete="off" autocorrect="off" autocapitalize="off">
     </label>
+    <p class="hint" id="new-hint">Para crear subcarpetas, usá <code>/</code> en el nombre (ej: <code>2026/05</code>).</p>
     <div id="new-msg" class="msg"></div>
     <div class="modal-actions">
       <span class="spacer"></span>
