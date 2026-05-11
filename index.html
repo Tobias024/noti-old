@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<title>Notas</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div id="topbar">
+  <button id="toggle-sidebar" title="Menu">&#9776;</button>
+  <span id="current-path" class="path">&nbsp;</span>
+  <span class="spacer"></span>
+  <button id="new-btn" title="Nuevo">+ Nuevo</button>
+  <button id="edit-btn" disabled>Editar</button>
+  <button id="save-btn" class="hidden">Guardar</button>
+  <button id="cancel-btn" class="hidden">Cancelar</button>
+  <button id="refresh-btn" title="Recargar arbol">&#x21bb;</button>
+  <button id="settings-btn" title="Configuracion">&#9881;</button>
+  <button id="theme-btn" title="Tema">Tema</button>
+</div>
+
+<div id="layout">
+  <aside id="sidebar">
+    <div id="tree"></div>
+  </aside>
+  <main id="main">
+    <div id="render" class="render"></div>
+    <textarea id="editor" class="hidden" spellcheck="false"></textarea>
+    <div id="empty" class="empty">Elegi una nota de la izquierda, o creá una nueva.</div>
+  </main>
+</div>
+
+<div id="modal-setup" class="modal hidden" aria-hidden="true">
+  <div class="modal-box">
+    <h3>Configuracion</h3>
+    <p class="hint">Tus datos quedan en este dispositivo (localStorage). El PAT nunca sale a otro servidor.</p>
+    <label class="field">GitHub username
+      <input type="text" id="cfg-user" autocomplete="off" autocorrect="off" autocapitalize="off">
+    </label>
+    <label class="field">Repo (solo el nombre)
+      <input type="text" id="cfg-repo" autocomplete="off" autocorrect="off" autocapitalize="off">
+    </label>
+    <label class="field">Branch
+      <input type="text" id="cfg-branch" value="main" autocomplete="off" autocorrect="off" autocapitalize="off">
+    </label>
+    <label class="field">Personal Access Token (fine-grained, Contents:RW)
+      <input type="password" id="cfg-pat" autocomplete="off">
+    </label>
+    <div id="cfg-msg" class="msg"></div>
+    <div class="modal-actions">
+      <button id="cfg-clear" class="ghost">Borrar PAT</button>
+      <span class="spacer"></span>
+      <button id="cfg-cancel" class="ghost">Cancelar</button>
+      <button id="cfg-save">Guardar</button>
+    </div>
+  </div>
+</div>
+
+<div id="modal-new" class="modal hidden" aria-hidden="true">
+  <div class="modal-box">
+    <h3>Nuevo</h3>
+    <div class="tabs">
+      <button id="new-tab-file" class="tab active" data-kind="file">Nota</button>
+      <button id="new-tab-folder" class="tab" data-kind="folder">Carpeta</button>
+    </div>
+    <label class="field">Carpeta destino (vacio para raiz)
+      <input type="text" id="new-parent" autocomplete="off" autocorrect="off" autocapitalize="off" placeholder="trabajo/2026">
+    </label>
+    <label class="field" id="new-name-label">Nombre (sin .md)
+      <input type="text" id="new-name" autocomplete="off" autocorrect="off" autocapitalize="off">
+    </label>
+    <div id="new-msg" class="msg"></div>
+    <div class="modal-actions">
+      <span class="spacer"></span>
+      <button id="new-cancel" class="ghost">Cancelar</button>
+      <button id="new-create">Crear</button>
+    </div>
+  </div>
+</div>
+
+<div id="modal-conflict" class="modal hidden" aria-hidden="true">
+  <div class="modal-box">
+    <h3>Conflicto</h3>
+    <p>El archivo cambio en GitHub desde que lo abriste. Que querés hacer?</p>
+    <p class="hint">Si elegis "Copiar y recargar", tu texto queda en el portapapeles para que pegues a mano si hace falta.</p>
+    <div id="conflict-msg" class="msg"></div>
+    <div class="modal-actions">
+      <span class="spacer"></span>
+      <button id="conflict-discard" class="ghost">Descartar mis cambios</button>
+      <button id="conflict-copy">Copiar y recargar</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<script src="vendor/snarkdown.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
