@@ -168,7 +168,18 @@
     var c = state.cfg;
     api('GET', '/repos/' + c.user + '/' + c.repo + '/git/trees/' + encodeURIComponent(c.branch) + '?recursive=1',
       null, function (err, data) {
-        if (err) { cb(err); return; }
+        if (err) {
+          // Repo recien creado sin commits: GitHub responde 409 "Git Repository
+          // is empty.". Tambien podriamos ver 404 si la branch no existe todavia
+          // (caso default-branch del repo distinto al que configuro el usuario,
+          // o el primer commit aun no se hizo).
+          var msg = (err.error || '').toLowerCase();
+          if (err.status === 409 || (err.status === 404 && msg.indexOf('empty') >= 0)) {
+            cb(null, []);
+            return;
+          }
+          cb(err); return;
+        }
         if (!data || !data.tree) { cb({ status: 0, error: 'Respuesta sin tree' }); return; }
         cb(null, data.tree);
       });
