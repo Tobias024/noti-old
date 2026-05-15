@@ -24,6 +24,7 @@
   var elRender = document.getElementById('render');
   var elEditor = document.getElementById('editor');
   var elEmpty = document.getElementById('empty');
+  var elMdToolbar = document.getElementById('md-toolbar');
 
   var elModalSetup = document.getElementById('modal-setup');
   var elCfgUser = document.getElementById('cfg-user');
@@ -45,6 +46,8 @@
   var elNewTabFile = document.getElementById('new-tab-file');
   var elNewTabFolder = document.getElementById('new-tab-folder');
 
+  var elSearchInput = document.getElementById('search-input');
+
   var elModalConflict = document.getElementById('modal-conflict');
   var elConflictMsg = document.getElementById('conflict-msg');
   var elConflictDiscard = document.getElementById('conflict-discard');
@@ -57,7 +60,9 @@
   var LS_LAST = 'notas.lastPath';
   var LS_TREE = 'notas.treeCache';   // {ts, items}
   var LS_THEME = 'notas.theme';
-  var TREE_TTL_MS = 60 * 1000;
+  var LS_DRAFT_PREFIX = 'notas.draft.'; // + path -> texto sin guardar
+  var TREE_TTL_MS = 5 * 60 * 1000;
+  var DRAFT_AUTOSAVE_MS = 3000;
 
   // En deploy (Vercel) usamos el proxy /api/gh para evitar problemas de TLS/CORS
   // con dispositivos viejos (iPad mini 1 / Safari 9). En dev (file://, localhost)
@@ -80,7 +85,10 @@
     expanded: {},      // folder paths -> true
     pendingDrawings: {},  // path -> {elements, sha} — cambios sin guardar
     drawingCache: {},     // path -> {version, elements, sha} — cache de la nota abierta
-    activeDrawing: null   // {path, api} cuando el modal de dibujo esta abierto
+    activeDrawing: null,  // {path, api} cuando el modal de dibujo esta abierto
+    draftTimer: null,     // setInterval id mientras se autosave-a un draft
+    pendingDraft: null,   // texto recuperado de localStorage a inyectar al entrar a edit
+    searchQuery: ''       // filtro del sidebar (lowercase)
   };
 
   // ------------- Helpers -------------
@@ -219,6 +227,42 @@
     return parts.join('/');
   }
 
+  // ------------- Draft autosave -------------
+  // Safari 9 puede matar la pestana en background sin avisar. Persistimos el
+  // textarea cada DRAFT_AUTOSAVE_MS para no perder lo que estabas tipeando.
+  function draftKey(path) { return LS_DRAFT_PREFIX + path; }
+  function saveDraft(path, text) {
+    if (!path) return;
+    try { localStorage.setItem(draftKey(path), text); } catch (e) {}
+  }
+  function loadDraft(path) {
+    if (!path) return null;
+    try { return localStorage.getItem(draftKey(path)); } catch (e) { return null; }
+  }
+  function clearDraft(path) {
+    if (!path) return;
+    try { localStorage.removeItem(draftKey(path)); } catch (e) {}
+  }
+  function startDraftAutosave() {
+    stopDraftAutosave();
+    state.draftTimer = setInterval(function () {
+      if (state.editing && state.openPath) {
+        saveDraft(state.openPath, elEditor.value);
+      }
+    }, DRAFT_AUTOSAVE_MS);
+  }
+  function stopDraftAutosave() {
+    if (state.draftTimer) {
+      clearInterval(state.draftTimer);
+      state.draftTimer = null;
+    }
+    // Flush sincronico: el ultimo intervalo pudo haber sido hace casi
+    // DRAFT_AUTOSAVE_MS, no queremos perder esos segundos.
+    if (state.editing && state.openPath) {
+      saveDraft(state.openPath, elEditor.value);
+    }
+  }
+
   // ------------- Tree caching -------------
   function cacheTree(items) {
     try {
@@ -321,6 +365,7 @@
 
   function renderTree() {
     var root = buildTreeNodes(state.tree);
+    if (state.searchQuery) markMatches(root, state.searchQuery);
     elTree.innerHTML = '';
     if (!root.order.length) {
       var empty = document.createElement('div');
@@ -330,10 +375,38 @@
       return;
     }
     var ul = document.createElement('ul');
+    var rendered = 0;
     for (var i = 0; i < root.order.length; i++) {
-      ul.appendChild(renderNode(root.children[root.order[i]]));
+      var child = root.children[root.order[i]];
+      if (state.searchQuery && !child._matches) continue;
+      ul.appendChild(renderNode(child));
+      rendered++;
+    }
+    if (state.searchQuery && rendered === 0) {
+      var noMatch = document.createElement('div');
+      noMatch.className = 'empty-msg';
+      noMatch.textContent = 'Sin resultados para "' + state.searchQuery + '"';
+      elTree.appendChild(noMatch);
+      return;
     }
     elTree.appendChild(ul);
+  }
+  // Marca _matches en cada nodo y auto-expande ancestros de matches.
+  function markMatches(node, q) {
+    var anyChild = false;
+    for (var i = 0; i < node.order.length; i++) {
+      var child = node.children[node.order[i]];
+      if (markMatches(child, q)) anyChild = true;
+    }
+    var selfMatch = false;
+    if (node.type === 'blob') {
+      selfMatch = node.path.toLowerCase().indexOf(q) >= 0;
+    }
+    node._matches = anyChild || selfMatch;
+    if (node._matches && node.type === 'tree' && node.path) {
+      state.expanded[node.path] = true;
+    }
+    return node._matches;
   }
 
   function renderNode(node) {
@@ -391,7 +464,9 @@
     if (node.type === 'tree' && state.expanded[node.path]) {
       var sub = document.createElement('ul');
       for (var i = 0; i < node.order.length; i++) {
-        sub.appendChild(renderNode(node.children[node.order[i]]));
+        var c = node.children[node.order[i]];
+        if (state.searchQuery && !c._matches) continue;
+        sub.appendChild(renderNode(c));
       }
       li.appendChild(sub);
     }
@@ -456,6 +531,17 @@
       renderTree();
       // close sidebar overlay on small screens
       if (window.innerWidth <= 720) elSidebar.classList.add('hidden');
+      // Si quedo un draft sin guardar (Safari mato la pestana, refresh, etc),
+      // ofrecer recuperarlo. Solo si difiere del contenido remoto.
+      var draft = loadDraft(path);
+      if (draft != null && draft !== content) {
+        if (confirm('Hay un borrador sin guardar de "' + path + '". Recuperar? (Cancelar lo descarta)')) {
+          state.pendingDraft = draft;
+          setMode('edit');
+        } else {
+          clearDraft(path);
+        }
+      }
     });
   }
 
@@ -463,8 +549,63 @@
     var html;
     try { html = window.snarkdown(md || ''); }
     catch (e) { html = '<p>(error renderizando)</p>'; }
-    elRender.innerHTML = html;
+    elRender.innerHTML = '';
+    var safe = sanitizeHtml(html);
+    while (safe.firstChild) elRender.appendChild(safe.firstChild);
     postProcessDrawings();
+  }
+
+  // snarkdown deja pasar HTML inline ('<script>', on*-handlers, javascript:).
+  // Si una nota maliciosa lo aprovecha, puede leer el PAT de localStorage.
+  // Whitelist chica de tags y atributos; todo lo demas se descarta.
+  var ALLOWED_TAGS = {
+    A:1, P:1, BR:1, HR:1, STRONG:1, EM:1, B:1, I:1, U:1, S:1, DEL:1,
+    H1:1, H2:1, H3:1, H4:1, H5:1, H6:1,
+    UL:1, OL:1, LI:1,
+    CODE:1, PRE:1, BLOCKQUOTE:1,
+    IMG:1, SPAN:1, DIV:1
+  };
+  var ALLOWED_ATTRS = {
+    href:1, src:1, alt:1, title:1
+  };
+  function sanitizeHtml(html) {
+    var holder = document.createElement('div');
+    holder.innerHTML = html || '';
+    sanitizeNode(holder);
+    return holder;
+  }
+  function sanitizeNode(node) {
+    var i, child, next;
+    child = node.firstChild;
+    while (child) {
+      next = child.nextSibling;
+      if (child.nodeType === 1) {
+        var tag = child.tagName;
+        if (!ALLOWED_TAGS[tag]) {
+          // Promover los hijos antes de eliminar el nodo (asi no perdemos texto).
+          while (child.firstChild) node.insertBefore(child.firstChild, child);
+          node.removeChild(child);
+        } else {
+          var attrs = child.attributes;
+          for (i = attrs.length - 1; i >= 0; i--) {
+            var a = attrs[i];
+            var nm = a.name.toLowerCase();
+            if (!ALLOWED_ATTRS[nm]) {
+              child.removeAttribute(a.name);
+              continue;
+            }
+            if ((nm === 'href' || nm === 'src') && /^\s*javascript:/i.test(a.value)) {
+              child.removeAttribute(a.name);
+            }
+          }
+          sanitizeNode(child);
+        }
+      } else if (child.nodeType === 8) {
+        // comentarios fuera
+        node.removeChild(child);
+      }
+      child = next;
+    }
   }
 
   function postProcessDrawings() {
@@ -579,6 +720,56 @@
     textarea.selectionStart = textarea.selectionEnd = newPos;
   }
 
+  // ------------- Markdown toolbar helpers -------------
+  // Envuelve la seleccion (o el placeholder) con before/after.
+  function wrapSelection(textarea, before, after, placeholder) {
+    var start = textarea.selectionStart || 0;
+    var end = textarea.selectionEnd || 0;
+    var value = textarea.value;
+    var sel = value.substring(start, end);
+    var inner = sel || (placeholder || '');
+    textarea.value = value.substring(0, start) + before + inner + after + value.substring(end);
+    textarea.focus();
+    if (sel) {
+      textarea.selectionStart = start + before.length;
+      textarea.selectionEnd = start + before.length + inner.length;
+    } else {
+      var pos = start + before.length;
+      textarea.selectionStart = pos;
+      textarea.selectionEnd = pos + inner.length;
+    }
+  }
+  // Agrega un prefijo al inicio de cada linea de la seleccion (o de la linea actual).
+  function prefixLines(textarea, prefix) {
+    var start = textarea.selectionStart || 0;
+    var end = textarea.selectionEnd || 0;
+    var value = textarea.value;
+    // Expandir al inicio de la primera linea.
+    var lineStart = value.lastIndexOf('\n', start - 1) + 1;
+    var block = value.substring(lineStart, end);
+    var lines = block.split('\n');
+    for (var i = 0; i < lines.length; i++) lines[i] = prefix + lines[i];
+    var replaced = lines.join('\n');
+    textarea.value = value.substring(0, lineStart) + replaced + value.substring(end);
+    textarea.focus();
+    textarea.selectionStart = lineStart;
+    textarea.selectionEnd = lineStart + replaced.length;
+  }
+  function applyMdAction(action) {
+    var ta = elEditor;
+    if (action === 'bold')      { wrapSelection(ta, '**', '**', 'texto'); }
+    else if (action === 'italic')   { wrapSelection(ta, '*', '*', 'texto'); }
+    else if (action === 'code')     { wrapSelection(ta, '`', '`', 'codigo'); }
+    else if (action === 'codeblock'){ wrapSelection(ta, '\n```\n', '\n```\n', 'codigo'); }
+    else if (action === 'link')     { wrapSelection(ta, '[', '](https://)', 'texto'); }
+    else if (action === 'h1')       { prefixLines(ta, '# '); }
+    else if (action === 'h2')       { prefixLines(ta, '## '); }
+    else if (action === 'ul')       { prefixLines(ta, '- '); }
+    else if (action === 'ol')       { prefixLines(ta, '1. '); }
+    else if (action === 'quote')    { prefixLines(ta, '> '); }
+    else if (action === 'hr')       { insertAtCursor(ta, '\n\n---\n\n'); }
+  }
+
   function openDrawingModal(pathOrNull) {
     if (state.activeDrawing) return;
     var isNew = !pathOrNull;
@@ -633,7 +824,10 @@
   function setMode(mode) {
     if (mode === 'edit') {
       state.editing = true;
-      elEditor.value = state.openContent;
+      // En el flujo normal el textarea arranca con el contenido remoto.
+      // Cuando recuperamos un draft, el caller setea pendingDraft con el texto.
+      elEditor.value = (state.pendingDraft != null) ? state.pendingDraft : state.openContent;
+      state.pendingDraft = null;
       elEditor.classList.remove('hidden');
       elRender.classList.add('hidden');
       elEditBtn.classList.add('hidden');
@@ -641,11 +835,15 @@
       elCancelBtn.classList.remove('hidden');
       elDeleteBtn.classList.add('hidden');
       elInsertDrawingBtn.classList.remove('hidden');
+      elMdToolbar.classList.remove('hidden');
+      elEditor.classList.add('with-toolbar');
       elNewBtn.disabled = true;
       refreshDrawingStrip();
+      startDraftAutosave();
       setTimeout(function () { elEditor.focus(); }, 30);
     } else {
       state.editing = false;
+      stopDraftAutosave();
       elEditor.classList.add('hidden');
       elRender.classList.remove('hidden');
       elEditBtn.classList.remove('hidden');
@@ -653,6 +851,8 @@
       elCancelBtn.classList.add('hidden');
       elDeleteBtn.classList.remove('hidden');
       elInsertDrawingBtn.classList.add('hidden');
+      elMdToolbar.classList.add('hidden');
+      elEditor.classList.remove('with-toolbar');
       elDrawingsStrip.classList.add('hidden');
       elEditor.classList.remove('with-strip');
       elNewBtn.disabled = false;
@@ -716,10 +916,11 @@
         if (data && data.content && data.content.sha) {
           state.openSha = data.content.sha;
         }
+        clearDraft(state.openPath);
         renderMarkdown(newContent);
         setMode('view');
         toast('Guardado');
-        try { localStorage.removeItem(LS_TREE); } catch (e) {}
+        cacheTree(state.tree);
       });
   }
 
@@ -738,10 +939,11 @@
           return;
         }
         state.tree = state.tree.filter(function (it) { return it.path !== path; });
+        clearDraft(path);
         clearOpenNote();
         renderTree();
         toast('Borrado');
-        try { localStorage.removeItem(LS_TREE); } catch (e) {}
+        cacheTree(state.tree);
         setTimeout(loadTreeFromServer, 1500);
       });
   }
@@ -788,7 +990,7 @@
       if (state.openPath && state.openPath.indexOf(prefix) === 0) clearOpenNote();
       renderTree();
       toast('Carpeta borrada');
-      try { localStorage.removeItem(LS_TREE); } catch (e) {}
+      cacheTree(state.tree);
       setTimeout(loadTreeFromServer, 1500);
       return;
     }
@@ -816,6 +1018,7 @@
     elConflictMsg.textContent = '';
     elModalConflict.classList.remove('hidden');
     elConflictDiscard.onclick = function () {
+      clearDraft(state.openPath);
       elModalConflict.classList.add('hidden');
       openNote(state.openPath);
     };
@@ -836,6 +1039,7 @@
         setMsg(elConflictMsg, 'No pude copiar al portapapeles. Selecciona el texto en el editor y copia a mano.');
         return;
       }
+      clearDraft(state.openPath);
       elModalConflict.classList.add('hidden');
       toast('Texto copiado. Recargando version actual.');
       openNote(state.openPath);
@@ -919,11 +1123,11 @@
         'Create ' + fpath, function (err) {
           if (err) { setMsg(elNewMsg, friendlyError(err)); return; }
           elModalNew.classList.add('hidden');
-          try { localStorage.removeItem(LS_TREE); } catch (e) {}
           // Update optimista: GitHub's git/trees endpoint puede tardar segundos en
           // reflejar el archivo nuevo. Lo agregamos al estado local para que aparezca
           // ya, y refrescamos del server con delay como safety net.
           state.tree.push({ path: fpath, type: 'blob' });
+          cacheTree(state.tree);
           expandAncestors(fpath);
           renderTree();
           openNote(fpath);
@@ -936,8 +1140,8 @@
       apiPutFile(fpath2, '', null, 'Create folder ' + name, function (err) {
         if (err) { setMsg(elNewMsg, friendlyError(err)); return; }
         elModalNew.classList.add('hidden');
-        try { localStorage.removeItem(LS_TREE); } catch (e) {}
         state.tree.push({ path: fpath2, type: 'blob' });
+        cacheTree(state.tree);
         state.expanded[folderPath] = true;
         renderTree();
         setTimeout(function () { loadTreeFromServer(); }, 1500);
@@ -994,6 +1198,16 @@
     elToggleSidebar.onclick = function () {
       elSidebar.classList.toggle('hidden');
     };
+    // Search del sidebar: filtro client-side sobre el path. Auto-expande
+    // ancestros de los matches via markMatches() en renderTree.
+    function onSearchChange() {
+      var q = (elSearchInput.value || '').toLowerCase();
+      if (q === state.searchQuery) return;
+      state.searchQuery = q;
+      renderTree();
+    }
+    elSearchInput.onkeyup = onSearchChange;
+    elSearchInput.oninput = onSearchChange;
     elThemeBtn.onclick = toggleTheme;
     elSettingsBtn.onclick = function () { openSetupModal(); };
     elCfgSave.onclick = saveSetup;
@@ -1033,6 +1247,7 @@
     };
     elCancelBtn.onclick = function () {
       state.pendingDrawings = {};
+      clearDraft(state.openPath);
       setMode('view');
       renderMarkdown(state.openContent);
     };
@@ -1041,6 +1256,24 @@
     elInsertDrawingBtn.onclick = function () { openDrawingModal(null); };
     elDrawingDone.onclick = function () { closeDrawingModal(true); };
     elDrawingCancel.onclick = function () { closeDrawingModal(false); };
+
+    // Toolbar de markdown: prevenimos el blur del textarea con mousedown/touchstart,
+    // y aplicamos la accion en click. Un solo listener delegado al contenedor.
+    function preventBlur(e) {
+      if (e.target && e.target.getAttribute && e.target.getAttribute('data-md')) {
+        if (e.preventDefault) e.preventDefault();
+      }
+    }
+    elMdToolbar.addEventListener('mousedown', preventBlur);
+    elMdToolbar.addEventListener('touchstart', preventBlur);
+    elMdToolbar.onclick = function (e) {
+      var t = e.target;
+      while (t && t !== elMdToolbar && !(t.getAttribute && t.getAttribute('data-md'))) {
+        t = t.parentNode;
+      }
+      if (!t || t === elMdToolbar) return;
+      applyMdAction(t.getAttribute('data-md'));
+    };
   }
 
   // ------------- Boot -------------
