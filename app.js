@@ -130,6 +130,12 @@
     localStorage.removeItem(LS_CFG);
     localStorage.removeItem(LS_TREE);
     localStorage.removeItem(LS_LAST);
+    // El SW cachea respuestas con el contenido de las notas. Si el usuario
+    // borra config (cambia de cuenta/repo) tenemos que purgar para que no
+    // reciba notas del scope anterior cuando reconfigure.
+    if (navigator.serviceWorker && navigator.serviceWorker.controller) {
+      navigator.serviceWorker.controller.postMessage({ type: 'CLEAR_NOTES' });
+    }
   }
 
   function loadTheme() {
@@ -1276,10 +1282,78 @@
     };
   }
 
+  // ------------- Service Worker + offline UX -------------
+  function registerSW() {
+    // En dev por file:// no hay SW. Tampoco lo registramos si el browser no lo
+    // soporta (iPad mini 1 / Safari 9 caen aca y siguen funcionando online).
+    if (!('serviceWorker' in navigator)) return;
+    if (location.protocol !== 'http:' && location.protocol !== 'https:') return;
+
+    navigator.serviceWorker.register('sw.js').then(function (reg) {
+      // Si ya hay un worker esperando al cargar, mostrar el banner.
+      if (reg.waiting && navigator.serviceWorker.controller) {
+        showUpdateBanner(reg.waiting);
+      }
+      reg.addEventListener('updatefound', function () {
+        var nw = reg.installing;
+        if (!nw) return;
+        nw.addEventListener('statechange', function () {
+          if (nw.state === 'installed' && navigator.serviceWorker.controller) {
+            // Hay un controller existente => esto es un update, no la primera instalacion.
+            showUpdateBanner(nw);
+          }
+        });
+      });
+    }).catch(function () { /* SW opcional, no es bloqueante */ });
+
+    // Recarga la pagina cuando el nuevo SW toma control (post skipWaiting).
+    var refreshed = false;
+    navigator.serviceWorker.addEventListener('controllerchange', function () {
+      if (refreshed) return;
+      refreshed = true;
+      location.reload();
+    });
+  }
+
+  function showUpdateBanner(worker) {
+    var banner = document.getElementById('update-banner');
+    var btn = document.getElementById('update-reload');
+    if (!banner || !btn) return;
+    banner.classList.remove('hidden');
+    btn.onclick = function () {
+      worker.postMessage({ type: 'SKIP_WAITING' });
+    };
+  }
+
+  function setupOfflineUX() {
+    var banner = document.getElementById('offline-banner');
+    function sync() {
+      var off = (typeof navigator.onLine === 'boolean') ? !navigator.onLine : false;
+      if (banner) {
+        if (off) banner.classList.remove('hidden');
+        else banner.classList.add('hidden');
+      }
+      // Bloquear Guardar mientras estamos offline: el PUT a GitHub iria a fallar
+      // y el draft de localStorage ya cubre "no perder lo que escribi".
+      if (off) {
+        elSaveBtn.disabled = true;
+        elSaveBtn.title = 'Sin conexion - el draft queda guardado localmente';
+      } else if (state.editing) {
+        elSaveBtn.disabled = false;
+        elSaveBtn.title = '';
+      }
+    }
+    window.addEventListener('online', sync);
+    window.addEventListener('offline', sync);
+    sync();
+  }
+
   // ------------- Boot -------------
   function boot() {
     loadTheme();
     bind();
+    registerSW();
+    setupOfflineUX();
     var cfg = loadCfg();
     if (!cfg) {
       openSetupModal();

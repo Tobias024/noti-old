@@ -402,6 +402,44 @@ body.theme-dark .md-toolbar button {
   text-align: center;
 }
 
+.offline-banner {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: #b14b00;
+  color: #fff;
+  padding: 8px 14px;
+  font-size: 13px;
+  text-align: center;
+  z-index: 28;
+}
+
+.update-banner {
+  position: fixed;
+  left: 50%;
+  top: 64px;
+  -webkit-transform: translateX(-50%);
+  transform: translateX(-50%);
+  background: #1e6fff;
+  color: #fff;
+  padding: 8px 14px;
+  border-radius: 6px;
+  font-size: 13px;
+  z-index: 29;
+  max-width: 90%;
+}
+.update-banner button {
+  background: #fff;
+  color: #1e6fff;
+  border: 0;
+  padding: 4px 10px;
+  margin-left: 10px;
+  border-radius: 4px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
 /* Drawing modal (fullscreen) */
 .modal.modal-full {
   padding: 0;

@@ -6,7 +6,11 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="theme-color" content="#1e1e1e">
 <title>Notas</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" type="image/svg+xml" href="icon.svg">
+<link rel="apple-touch-icon" href="icon.svg">
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -149,6 +153,11 @@
 </div>
 
 <div id="toast" class="toast hidden"></div>
+<div id="offline-banner" class="offline-banner hidden">Sin conexion. Las notas ya abiertas siguen disponibles; no se puede guardar hasta volver.</div>
+<div id="update-banner" class="update-banner hidden">
+  <span>Hay una version nueva.</span>
+  <button id="update-reload">Actualizar</button>
+</div>
 
 <script src="vendor/snarkdown.js"></script>
 <script src="vendor/excaliold.js"></script>
