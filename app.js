@@ -44,6 +44,7 @@
   var elNewCreate = document.getElementById('new-create');
   var elNewCancel = document.getElementById('new-cancel');
   var elNewTabFile = document.getElementById('new-tab-file');
+  var elNewTabHtml = document.getElementById('new-tab-html');
   var elNewTabFolder = document.getElementById('new-tab-folder');
 
   var elSearchInput = document.getElementById('search-input');
@@ -80,6 +81,7 @@
     openPath: null,
     openSha: null,
     openContent: '',
+    openType: 'md',    // 'md' | 'html'
     editing: false,
     newKind: 'file',
     expanded: {},      // folder paths -> true
@@ -316,7 +318,7 @@
         continue;
       }
 
-      if (!/\.md$/i.test(it.path)) continue;
+      if (!/\.(md|html?)$/i.test(it.path)) continue;
       ensurePath(root, it.path, true);
     }
 
@@ -431,7 +433,9 @@
     icon.className = 'icon';
     var nameEl = document.createElement('span');
     nameEl.className = 'name';
-    nameEl.textContent = node.type === 'blob' ? node.name.replace(/\.md$/i, '') : node.name;
+    var displayName = node.name;
+    if (node.type === 'blob') displayName = displayName.replace(/\.(md|html?)$/i, '');
+    nameEl.textContent = displayName;
 
     if (node.type === 'tree') {
       var expanded = !!state.expanded[node.path];
@@ -443,7 +447,7 @@
       };
     } else {
       caret.innerHTML = '&nbsp;';
-      icon.textContent = '📄';
+      icon.textContent = /\.html?$/i.test(node.name) ? '🌐' : '📄';
       row.onclick = function () { openNote(node.path); };
     }
 
@@ -511,6 +515,10 @@
   }
 
   // ------------- Open note -------------
+  function detectType(path) {
+    return /\.html?$/i.test(path) ? 'html' : 'md';
+  }
+
   function openNote(path) {
     setMode('view');
     elPath.textContent = path;
@@ -529,9 +537,10 @@
       state.openPath = path;
       state.openSha = data.sha;
       state.openContent = content;
+      state.openType = detectType(path);
       localStorage.setItem(LS_LAST, path);
       expandAncestors(path);
-      renderMarkdown(content);
+      renderView(content);
       elEditBtn.disabled = false;
       elDeleteBtn.disabled = false;
       renderTree();
@@ -549,6 +558,22 @@
         }
       }
     });
+  }
+
+  function renderView(content) {
+    if (state.openType === 'html') {
+      elRender.className = 'render html-mode';
+      elRender.innerHTML = '';
+      var iframe = document.createElement('iframe');
+      iframe.className = 'html-frame';
+      iframe.setAttribute('sandbox', '');
+      // sandbox sin allow-* → no scripts, no forms, no top-nav. Maximo aislamiento.
+      iframe.srcdoc = content || '';
+      elRender.appendChild(iframe);
+    } else {
+      elRender.className = 'render';
+      renderMarkdown(content);
+    }
   }
 
   function renderMarkdown(md) {
@@ -840,11 +865,21 @@
       elSaveBtn.classList.remove('hidden');
       elCancelBtn.classList.remove('hidden');
       elDeleteBtn.classList.add('hidden');
-      elInsertDrawingBtn.classList.remove('hidden');
-      elMdToolbar.classList.remove('hidden');
-      elEditor.classList.add('with-toolbar');
+      // En .html no aplican ni el toolbar markdown ni el botón dibujo (la sintaxis
+      // markdown no se renderiza). Drafts (autosave) sí aplican a ambos tipos.
+      if (state.openType === 'md') {
+        elInsertDrawingBtn.classList.remove('hidden');
+        elMdToolbar.classList.remove('hidden');
+        elEditor.classList.add('with-toolbar');
+        refreshDrawingStrip();
+      } else {
+        elInsertDrawingBtn.classList.add('hidden');
+        elMdToolbar.classList.add('hidden');
+        elEditor.classList.remove('with-toolbar');
+        elDrawingsStrip.classList.add('hidden');
+        elEditor.classList.remove('with-strip');
+      }
       elNewBtn.disabled = true;
-      refreshDrawingStrip();
       startDraftAutosave();
       setTimeout(function () { elEditor.focus(); }, 30);
     } else {
@@ -923,7 +958,7 @@
           state.openSha = data.content.sha;
         }
         clearDraft(state.openPath);
-        renderMarkdown(newContent);
+        renderView(newContent);
         setMode('view');
         toast('Guardado');
         cacheTree(state.tree);
@@ -958,6 +993,7 @@
     state.openPath = null;
     state.openSha = null;
     state.openContent = '';
+    state.openType = 'md';
     state.pendingDrawings = {};
     state.drawingCache = {};
     try { localStorage.removeItem(LS_LAST); } catch (e) {}
@@ -1056,8 +1092,13 @@
   function openNewModal(kind) {
     state.newKind = kind || 'file';
     elNewTabFile.className = state.newKind === 'file' ? 'tab active' : 'tab';
+    elNewTabHtml.className = state.newKind === 'html' ? 'tab active' : 'tab';
     elNewTabFolder.className = state.newKind === 'folder' ? 'tab active' : 'tab';
-    elNewNameLabel.firstChild.nodeValue = state.newKind === 'file' ? 'Nombre (sin .md)' : 'Nombre carpeta';
+    var label;
+    if (state.newKind === 'file') label = 'Nombre (sin .md)';
+    else if (state.newKind === 'html') label = 'Nombre (sin .html)';
+    else label = 'Nombre carpeta';
+    elNewNameLabel.firstChild.nodeValue = label;
     populateParentSelect(inferParent());
     elNewName.value = '';
     setMsg(elNewMsg, '');
@@ -1121,24 +1162,29 @@
     if (/[\\:*?"<>|]/.test(name) || /\/\s|\s\/$/.test(name)) {
       setMsg(elNewMsg, 'Caracteres no permitidos en el nombre'); return;
     }
-    if (state.newKind === 'file') {
-      if (!/\.md$/i.test(name)) name = name + '.md';
+    if (state.newKind === 'file' || state.newKind === 'html') {
+      var ext = state.newKind === 'html' ? '.html' : '.md';
+      var rext = state.newKind === 'html' ? /\.html?$/i : /\.md$/i;
+      if (!rext.test(name)) name = name + ext;
       var fpath = parent ? parent + '/' + name : name;
+      var titleNoExt = name.replace(rext, '');
+      var initial = state.newKind === 'html'
+        ? '<!doctype html>\n<html lang="es">\n<head>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">\n<title>' + titleNoExt + '</title>\n<style>\n  body { font-family: -apple-system, sans-serif; max-width: 720px; margin: 32px auto; padding: 0 16px; color: #222; line-height: 1.55; }\n  h1 { margin-top: 0; }\n</style>\n</head>\n<body>\n\n<h1>' + titleNoExt + '</h1>\n<p>Escribí HTML aquí.</p>\n\n</body>\n</html>\n'
+        : '# ' + titleNoExt + '\n\n';
       setMsg(elNewMsg, 'Creando...');
-      apiPutFile(fpath, '# ' + name.replace(/\.md$/i, '') + '\n\n', null,
-        'Create ' + fpath, function (err) {
-          if (err) { setMsg(elNewMsg, friendlyError(err)); return; }
-          elModalNew.classList.add('hidden');
-          // Update optimista: GitHub's git/trees endpoint puede tardar segundos en
-          // reflejar el archivo nuevo. Lo agregamos al estado local para que aparezca
-          // ya, y refrescamos del server con delay como safety net.
-          state.tree.push({ path: fpath, type: 'blob' });
-          cacheTree(state.tree);
-          expandAncestors(fpath);
-          renderTree();
-          openNote(fpath);
-          setTimeout(function () { loadTreeFromServer(); }, 1500);
-        });
+      apiPutFile(fpath, initial, null, 'Create ' + fpath, function (err) {
+        if (err) { setMsg(elNewMsg, friendlyError(err)); return; }
+        elModalNew.classList.add('hidden');
+        // Update optimista: GitHub's git/trees endpoint puede tardar segundos en
+        // reflejar el archivo nuevo. Lo agregamos al estado local para que aparezca
+        // ya, y refrescamos del server con delay como safety net.
+        state.tree.push({ path: fpath, type: 'blob' });
+        cacheTree(state.tree);
+        expandAncestors(fpath);
+        renderTree();
+        openNote(fpath);
+        setTimeout(function () { loadTreeFromServer(); }, 1500);
+      });
     } else {
       var fpath2 = (parent ? parent + '/' : '') + name + '/.gitkeep';
       var folderPath = (parent ? parent + '/' : '') + name;
@@ -1243,6 +1289,7 @@
       openNewModal('file');
     };
     elNewTabFile.onclick = function () { openNewModal('file'); };
+    elNewTabHtml.onclick = function () { openNewModal('html'); };
     elNewTabFolder.onclick = function () { openNewModal('folder'); };
     elNewCancel.onclick = function () { elModalNew.classList.add('hidden'); };
     elNewCreate.onclick = createNew;
@@ -1255,7 +1302,7 @@
       state.pendingDrawings = {};
       clearDraft(state.openPath);
       setMode('view');
-      renderMarkdown(state.openContent);
+      renderView(state.openContent);
     };
     elSaveBtn.onclick = saveCurrent;
     elDeleteBtn.onclick = deleteCurrent;
